@@ -45,6 +45,8 @@ def parse_args():
     p.add_argument('--log_interval', default=1e-3, type=float)
     p.add_argument('--output_dir', type=str, default='training_runs/')
 
+    p.add_argument('--accumulate_grad_batches', type=int, default=1)
+
     p.add_argument('--seed', type=int, default=42)
 
     args = p.parse_args()
@@ -107,6 +109,6 @@ if __name__ == "__main__":
     if not args.dev_run: 
         trainer = pl.Trainer(accelerator='gpu', callbacks=lr_monitor, max_epochs=10, devices=1, log_every_n_steps=steps_per_log, logger=wandb_logger)
     else:
-        trainer = pl.Trainer(accelerator='gpu', callbacks=lr_monitor, max_steps=20, devices=1, log_every_n_steps=steps_per_log, logger=wandb_logger)
+        trainer = pl.Trainer(accelerator='gpu', callbacks=lr_monitor, max_steps=20, devices=1, log_every_n_steps=steps_per_log, logger=wandb_logger, accumulate_grad_batches=args.accumulate_grad_batches)
 
     trainer.fit(model, train_dataloader)
