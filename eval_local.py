@@ -7,7 +7,7 @@ DEVICE = 'cuda'
 
 #fetch and load model from Google Cloud
 # model = cloudpickle.load(fsspec.open_files("gs://mscbio2066-data/model.pkl","rb")[0].open())
-model = cloudpickle.load(open('training_runs/dummy-wl4237w7-3aa7/model_0_16.pkl', 'rb'))
+model = cloudpickle.load(open('training_runs/comfy-thunder-66-e6d5/model_0_32.pkl', 'rb'))
 model.to(DEVICE)
 
 
