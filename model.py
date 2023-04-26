@@ -10,6 +10,8 @@ from masked_batch_norm import MaskedBatchNorm1d
 import cloudpickle
 from torch.distributions import Normal, Categorical
 
+from dataset import Dataset
+
 class BindingPredictor(pl.LightningModule):
 
     def __init__(self,
@@ -35,9 +37,6 @@ class BindingPredictor(pl.LightningModule):
         self.max_rec_pred_len = max_rec_pred_len
         self.language = Language()
 
-        self.lig_embedding = nn.Embedding(self.language.smi_lang_size,
-                                          embedding_dim=embedding_dim,
-                                          padding_idx=self.language.smi_pad_idx)
         self.rec_embedding = nn.Embedding(self.language.rec_lang_size, 
                                           embedding_dim=embedding_dim, 
                                           padding_idx=self.language.rec_pad_idx)
@@ -46,12 +45,17 @@ class BindingPredictor(pl.LightningModule):
         # for lig and rec bc caching of positional encodings
         self.pe = Summer(PositionalEncoding1D(embedding_dim))
 
-        self.lig_encoder = Encoder(embedding_dim=embedding_dim, n_layers=n_lig_layers, n_heads=n_lig_heads, dropout=dropout)
+        # self.lig_encoder = Encoder(embedding_dim=embedding_dim, n_layers=n_lig_layers, n_heads=n_lig_heads, dropout=dropout)
+        self.lig_encoder = nn.Sequential(
+            nn.Linear(2048, embedding_dim), 
+            nn.SiLU(), 
+            nn.Linear(embedding_dim, embedding_dim), 
+            nn.SiLU(), 
+            nn.BatchNorm1d(embedding_dim) 
+        )
         self.rec_encoder = Encoder(embedding_dim=embedding_dim, n_layers=n_rec_layers, n_heads=n_rec_heads, dropout=dropout)
 
         self.prediction_mlp = nn.Sequential(
-            nn.Linear(embedding_dim*2, embedding_dim*2),
-            nn.SiLU(),
             nn.Linear(embedding_dim*2, embedding_dim),
             nn.SiLU(),
             nn.Linear(embedding_dim, embedding_dim // 4),
@@ -67,18 +71,16 @@ class BindingPredictor(pl.LightningModule):
 
         self.seq_map = seq_map
 
-    def forward(self, lig_seqs, rec_seqs, lig_masks, rec_masks):
+    def forward(self, lig_fps, rec_seqs, rec_masks):
 
-        # expand lig and rec masks for easier broadcasting
-        lig_masks = lig_masks[:, :, None]
+        # expand rec masks for easier broadcasting
         rec_masks = rec_masks[:, :, None]
         
         # get embedded sequence tokens
-        lig_embedded = self.pe(self.lig_embedding(lig_seqs))*lig_masks
         rec_embedded = self.pe(self.rec_embedding(rec_seqs))*rec_masks
 
         # pass to encoders
-        lig_encoded = self.lig_encoder(lig_embedded, lig_masks) # (batch_size, embedding_dim)
+        lig_encoded = self.lig_encoder(lig_fps) # (batch_size, embedding_dim)
         rec_encoded = self.rec_encoder(rec_embedded, rec_masks) # (batch_size, embedding)dim
 
         # concat ligand and receptor encodings together and pass through final prediction network
@@ -86,23 +88,17 @@ class BindingPredictor(pl.LightningModule):
 
         pred_labels = self.prediction_mlp(complex_embedding).flatten()
 
-
         return pred_labels
 
     def training_step(self, batch_data, batch_idx):
-        lig_seqs, rec_seqs, labels, lig_masks, rec_masks = batch_data
+        lig_fps, rec_seqs, labels, rec_masks = batch_data
         labels = labels.float()
+        lig_fps = lig_fps.float()
 
-        # truncate ligand and receptor sequences to the length of the longest sequence in the batch
-        lig_seq_lens = lig_masks.sum(dim=1)
+        # truncate receptor sequences to the length of the longest sequence in the batch
         rec_seq_lens = rec_masks.sum(dim=1)
 
-        max_lig_len = lig_seq_lens.max()
         max_rec_len  = rec_seq_lens.max()
-
-        if max_lig_len < lig_seqs.shape[1]:
-            lig_seqs = lig_seqs[:, :max_lig_len]
-            lig_masks = lig_masks[:, :max_lig_len]
         
         if max_rec_len < rec_seqs.shape[1]:
             rec_seqs = rec_seqs[:, :max_rec_len]
@@ -115,7 +111,7 @@ class BindingPredictor(pl.LightningModule):
         epoch_exact = self.current_epoch + batch_idx/self.batches_per_epoch
         self.sched.step_lr(epoch_exact)
 
-        predicted_affinity = self(lig_seqs, rec_seqs, lig_masks, rec_masks)
+        predicted_affinity = self(lig_fps, rec_seqs, rec_masks)
 
         # compute loss
         loss = self.loss_fn(predicted_affinity, labels)
@@ -144,7 +140,9 @@ class BindingPredictor(pl.LightningModule):
         smi_seq = self.language.encode_smiles(smile).int()
         rec_seq = self.language.encode_rec(rec_str).int()
 
-        smi_seq = smi_seq.to(device)
+        lig_fps = Dataset.smiles_to_fp(smile)[None, :].float()
+        lig_fps = lig_fps.to(device)
+
         rec_seq = rec_seq.to(device)
 
         # TODO: reshape sequences
@@ -174,12 +172,11 @@ class BindingPredictor(pl.LightningModule):
             rec_seq = rec_seq[None, :]
 
         # make lig_seq match the shape of rec_seq by copying out lig_seqs
-        smi_seq = smi_seq.repeat(rec_seq.shape[0], 1)
+        smi_seq = lig_fps.repeat(rec_seq.shape[0], 1)
 
-        lig_mask = smi_seq != self.language.smi_pad_idx
         rec_mask = rec_seq != self.language.rec_pad_idx
 
-        predictions = self(smi_seq, rec_seq, lig_mask, rec_mask)
+        predictions = self(smi_seq, rec_seq, rec_mask)
         final_answer = float(torch.median(predictions))
         return final_answer
     

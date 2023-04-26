@@ -2,10 +2,14 @@ import torch
 from lang import Language
 import pandas as pd
 from pathlib import Path
+from rdkit import Chem
+from rdkit.Chem.rdFingerprintGenerator import GetRDKitFPGenerator
 
 from torch.distributions import Normal, Categorical
 
 class Dataset(torch.utils.data.Dataset):
+
+    gen = GetRDKitFPGenerator(minPath=1, maxPath=7, fpSize=2048)
 
     def __init__(self, pickle_file_path: str, max_lig_len=100, max_pred_rec_len=1200, max_save_rec_len=2600):
         super().__init__()
@@ -28,7 +32,7 @@ class Dataset(torch.utils.data.Dataset):
             self.ligs = data_dict['ligs']
             self.recs = data_dict['recs']
             self.labels = data_dict['labels']
-            self.lig_masks = data_dict['lig_masks']
+            # self.lig_masks = data_dict['lig_masks']
             self.rec_masks = data_dict['rec_masks']
             return
         
@@ -42,21 +46,21 @@ class Dataset(torch.utils.data.Dataset):
 
         # initialize data tensors
         nrows = unprocessed_data.shape[0]
-        encoded_ligs = torch.full((nrows, self.max_lig_len), fill_value=self.language.smi_pad_idx, dtype=torch.uint8)
+        encoded_ligs = torch.zeros((nrows, 2048), dtype=torch.bool)
         encoded_recs = torch.full((nrows, save_len), fill_value=self.language.rec_pad_idx, dtype=torch.uint8)
 
         # fill data tensors with encoded sequences
         for i, row in unprocessed_data.iterrows():
-            encoded_lig = self.language.encode_smiles(row['smiles'])
+            encoded_lig = self.smiles_to_fp(row['smiles'])
             encoded_rec = self.language.encode_rec(row['seq'])
 
-            encoded_ligs[i, :encoded_lig.shape[0]] = encoded_lig
+            encoded_ligs[i, :] = encoded_lig
             encoded_recs[i, :encoded_rec.shape[0]] = encoded_rec
 
             if i % 100000 == 0:
                 print(f'{i + 1} data examples processed')
 
-        lig_masks = encoded_ligs != self.language.smi_pad_idx
+        # lig_masks = encoded_ligs != self.language.smi_pad_idx
         rec_masks = encoded_recs != self.language.rec_pad_idx
 
         # convert labels to torch tensor
@@ -67,14 +71,12 @@ class Dataset(torch.utils.data.Dataset):
             'ligs': encoded_ligs,
             'recs': encoded_recs,
             'labels': labels,
-            'lig_masks': lig_masks,
             'rec_masks': rec_masks
         }, str(preprocessed_file))
 
         self.ligs = encoded_ligs
         self.recs = encoded_recs
         self.labels = labels
-        self.lig_masks = lig_masks
         self.rec_masks = rec_masks
 
     def __len__(self):
@@ -102,4 +104,13 @@ class Dataset(torch.utils.data.Dataset):
             rec_mask = rec_seq != self.language.rec_pad_idx
 
 
-        return self.ligs[idx].int(), rec_seq.int(), self.labels[idx], self.lig_masks[idx], rec_mask
+        return self.ligs[idx].int(), rec_seq.int(), self.labels[idx], rec_mask
+    
+    @classmethod
+    def smiles_to_fp(cls, smi):
+        mol = Chem.MolFromSmiles(smi, sanitize=False)
+        if mol is None:
+            return None
+        fp = cls.gen.GetFingerprintAsNumPy(mol)
+        fp = torch.tensor(fp).bool()
+        return fp
